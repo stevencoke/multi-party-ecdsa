@@ -52,11 +52,18 @@ fn main() {
         PartySignup { number, uuid } => (number, uuid),
     };
     println!("number: {:?}, uuid: {:?}", party_num_int, uuid);
-
+    
+    // 第 58、62 行，還不算 round 1，因為這兩行所需要的計算都不必依賴其他節點傳資料過來
+    // party_keys 包含 ui(local secret)、yi(local public key,也叫ephemeral public key)、dk(paillier 私鑰)、e(paillier 公鑰)
     let party_keys = Keys::create(party_num_int as usize);
+    
+    // bc_i：e、com(對 yi 的 commitment)、correct_key_proof(證明 paillier 公鑰是合法的。放在zk-paillier/src/zkproofs/correct_key_ni.rs)
+    // decom_i：blind_factor(com 的形式為 hash(r|yi)，r 就是 blind_factor)、yi
     let (bc_i, decom_i) = party_keys.phase1_broadcast_phase3_proof_of_correct_key();
 
     // send commitment to ephemeral public keys, get round 1 commitments of other parties
+    // round 1.
+    // 廣播 bc_i (e,com,correct_key_proof)
     assert!(broadcast(
         &client,
         party_num_int,
@@ -82,6 +89,8 @@ fn main() {
     bc1_vec.insert(party_num_int as usize - 1, bc_i);
 
     // send ephemeral public keys and check commitments correctness
+    // round 2. 
+    // 廣播 decom_i (blind_factor,yi)
     assert!(broadcast(
         &client,
         party_num_int,
@@ -98,7 +107,9 @@ fn main() {
         "round2",
         uuid.clone(),
     );
-
+    
+    // 以 Pi 的角度來看，他使用自己的 ui 以及在這 round 收到的 yj(來自 Pj)
+    // 執行 Diffie-Hellman key exchange 來得到 Pi 和 Pj 之間的 AES 私鑰。
     let mut j = 0;
     let mut point_vec: Vec<GE> = Vec::new();
     let mut decom_vec: Vec<KeyGenDecommitMessage1> = Vec::new();
@@ -119,10 +130,14 @@ fn main() {
             j = j + 1;
         }
     }
-
+    
+    // 計算 y_sum = ∑yi
     let (head, tail) = point_vec.split_at(1);
     let y_sum = tail.iter().fold(head[0], |acc, x| acc + x);
 
+    // 呼叫這個函數主要做兩件事情，1：驗證 com 以及 correct_key_proof、2：完成 VSS 計算
+    // vss_scheme：Pi 生成的多項式叫做 fi(x)。vss_scheme 就是把 fi(x) 的每個係數乘上 G(橢圓曲線的生成元)
+    // secret_shares：把 1~n 都代入 fi(x)取值，也就是 fi(1),fi(2),...,fi(n)
     let (vss_scheme, secret_shares, _index) = party_keys
         .phase1_verify_com_phase3_verify_correct_key_phase2_distribute(
             &params, &decom_vec, &bc1_vec,
@@ -130,7 +145,8 @@ fn main() {
         .expect("invalid key");
 
     //////////////////////////////////////////////////////////////////////////////
-
+    // round 3. 
+    // p2p 傳送 aead_pack_i(用 AES 加密過後的 fi(j)
     let mut j = 0;
     for (k, i) in (1..=PARTIES).enumerate() {
         if i != party_num_int {
@@ -160,6 +176,7 @@ fn main() {
         uuid.clone(),
     );
 
+    // Pi 把收到的 f1(i),f2(i),...,fn(i) 放進 party_shares
     let mut j = 0;
     let mut party_shares: Vec<FE> = Vec::new();
     for i in 1..=PARTIES {
@@ -178,6 +195,7 @@ fn main() {
     }
 
     // round 4: send vss commitments
+    // 廣播 vss_scheme (在 round 2 就生成好了。vss_scheme 就是把 fi(x) 的每個係數乘上 G，也就是對 fi(x) 的 commitment)
     assert!(broadcast(
         &client,
         party_num_int,
@@ -207,6 +225,9 @@ fn main() {
         }
     }
 
+    // 呼叫這個函數主要做幾件事情，1.驗證收到的 fj(i) 的正確性、2.計算 xi(Pi 在 signing 階段要使用的 share)、3.生成 xi 的離散對數證明 (需公開 Xi = xi*G)
+    // shared_keys：y (TSS 公鑰)、xi
+    // dlog_proof：xi 的離散對數證明，裡面包含 Xi (Xi = xi*G)
     let (shared_keys, dlog_proof) = party_keys
         .phase2_verify_vss_construct_keypair_phase3_pok_dlog(
             &params,
@@ -218,6 +239,7 @@ fn main() {
         .expect("invalid vss");
 
     // round 5: send dlog proof
+    // 廣播 dlog_proof
     assert!(broadcast(
         &client,
         party_num_int,
@@ -246,6 +268,8 @@ fn main() {
             j += 1;
         }
     }
+    
+    // 驗證 dlog_proof
     Keys::verify_dlog_proofs(&params, &dlog_proof_vec, &point_vec).expect("bad dlog proof");
 
     //save key to file:
